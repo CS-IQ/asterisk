@@ -568,32 +568,27 @@ struct ast_str *ast_manager_str_from_json_object(struct ast_json *blob, key_excl
 static void manager_default_msg_cb(void *data, struct stasis_subscription *sub,
 				    struct stasis_message *message)
 {
-	struct ao2_container *sessions;
+	struct ao2_container *sessions = data;
 	struct ast_manager_event_blob *ev;
 
-	if (!stasis_message_can_be_ami(message)) {
-		/* Not an AMI message; disregard */
-		return;
-	}
-
-	sessions = ao2_global_obj_ref(mgr_sessions);
+	/*
+	 * This callback only receives messages that can be turned into AMI events, so
+	 * no need to check that the message can be turned into an event before checking for listeners.
+	 */
 	if (!any_manager_listeners(sessions)) {
 		/* Nobody is listening */
-		ao2_cleanup(sessions);
 		return;
 	}
 
 	ev = stasis_message_to_ami(message);
 	if (!ev) {
 		/* Conversion failure */
-		ao2_cleanup(sessions);
 		return;
 	}
 
 	manager_event_sessions(sessions, ev->event_flags, ev->manager_event,
 		"%s", ev->extra_fields);
 	ao2_ref(ev, -1);
-	ao2_cleanup(sessions);
 }
 
 static void manager_generic_msg_cb(void *data, struct stasis_subscription *sub,
@@ -604,12 +599,10 @@ static void manager_generic_msg_cb(void *data, struct stasis_subscription *sub,
 	const char *type;
 	struct ast_json *event;
 	struct ast_str *event_buffer;
-	struct ao2_container *sessions;
+	struct ao2_container *sessions = data;
 
-	sessions = ao2_global_obj_ref(mgr_sessions);
 	if (!any_manager_listeners(sessions)) {
 		/* Nobody is listening */
-		ao2_cleanup(sessions);
 		return;
 	}
 
@@ -621,14 +614,33 @@ static void manager_generic_msg_cb(void *data, struct stasis_subscription *sub,
 	event_buffer = ast_manager_str_from_json_object(event, NULL);
 	if (!event_buffer) {
 		ast_log(AST_LOG_WARNING, "Error while creating payload for event %s\n", type);
-		ao2_cleanup(sessions);
 		return;
 	}
 
 	manager_event_sessions(sessions, class_type, type,
 		"%s", ast_str_buffer(event_buffer));
 	ast_free(event_buffer);
-	ao2_cleanup(sessions);
+}
+
+/*!
+ * \brief Callback for subscription change messages
+ * \param userdata The subscription user data (in our case a pointer to the sessions container)
+ * \param sub The subscription
+ * \param message The message
+ */
+static void manager_subscription_change_msg_cb(void *userdata, struct stasis_subscription *sub,
+		struct stasis_message *message)
+{
+	/*
+	 * When the subscription unsubscribes a final message is sent to the subscription
+	 * to indicate it. We use this to manage the lifetime of the sessions container
+	 * pointer stored with the subscription. When the subscription is done we drop
+	 * the reference to the sessions container (userdata) so it can be cleaned up
+	 * if needed.
+	 */
+	if (stasis_subscription_final_message(sub, message)) {
+		ao2_cleanup(userdata);
+	}
 }
 
 void ast_manager_publish_event(const char *type, int class_type, struct ast_json *obj)
@@ -1117,6 +1129,7 @@ static char *handle_showmancmd(struct ast_cli_entry *e, int cmd, struct ast_cli_
 #ifdef AST_XML_DOCS
 				if (cur->docsrc == AST_XML_DOC) {
 					char *synopsis = ast_xmldoc_printable(S_OR(cur->synopsis, "Not available"), 1);
+					char *provided_by = ast_xmldoc_printable(S_OR(cur->provided_by, "Not available"), 1);
 					char *since = ast_xmldoc_printable(S_OR(cur->since, "Not available"), 1);
 					char *description = ast_xmldoc_printable(S_OR(cur->description, "Not available"), 1);
 					char *syntax = ast_xmldoc_printable(S_OR(cur->syntax, "Not available"), 1);
@@ -1125,9 +1138,10 @@ static char *handle_showmancmd(struct ast_cli_entry *e, int cmd, struct ast_cli_
 					char *seealso = ast_xmldoc_printable(S_OR(cur->seealso, "Not available"), 1);
 					char *responses = ast_xmldoc_printable("None", 1);
 
-					if (!synopsis || !since || !description || !syntax || !arguments
+					if (!synopsis || !provided_by || !since || !description || !syntax || !arguments
 							|| !privilege || !seealso || !responses) {
 						ast_free(synopsis);
+						ast_free(provided_by);
 						ast_free(since);
 						ast_free(description);
 						ast_free(syntax);
@@ -1157,9 +1171,12 @@ static char *handle_showmancmd(struct ast_cli_entry *e, int cmd, struct ast_cli_
 						"%s\n\n"
 						COLORIZE_FMT "\n"
 						"%s\n\n"
+						COLORIZE_FMT "\n"
+						"%s\n\n"
 						COLORIZE_FMT "\n",
 						ast_term_color(COLOR_MAGENTA, 0), cur->action, ast_term_reset(),
 						COLORIZE(COLOR_MAGENTA, 0, "[Synopsis]"), synopsis,
+						COLORIZE(COLOR_MAGENTA, 0, "[Provided By]"), provided_by,
 						COLORIZE(COLOR_MAGENTA, 0, "[Since]"), since,
 						COLORIZE(COLOR_MAGENTA, 0, "[Description]"), description,
 						COLORIZE(COLOR_MAGENTA, 0, "[Syntax]"), syntax,
@@ -1199,6 +1216,7 @@ static char *handle_showmancmd(struct ast_cli_entry *e, int cmd, struct ast_cli_
 						);
 
 					ast_free(synopsis);
+					ast_free(provided_by);
 					ast_free(since);
 					ast_free(description);
 					ast_free(syntax);
@@ -5756,7 +5774,7 @@ static enum add_filter_result manager_add_filter(
 	RAII_VAR(struct event_filter_entry *, filter_entry,
 		ao2_t_alloc(sizeof(*filter_entry), event_filter_destructor, "event_filter allocation"),
 		ao2_cleanup);
-	char *options_start = NULL;
+	const char *options_start = NULL;
 	SCOPE_ENTER(3, "manager_add_filter(%s, %s, %p, %p)", criteria, filter_pattern, includefilters, excludefilters);
 
 	if (!filter_entry) {
@@ -7839,6 +7857,11 @@ int ast_manager_register2(const char *action, int auth, int (*func)(struct manse
 		return -1;
 	}
 
+	if (ast_string_field_init_extended(cur, provided_by)) {
+		ao2_t_ref(cur, -1, "action object creation failed");
+		return -1;
+	}
+
 	cur->action = action;
 	cur->authority = auth;
 	cur->func = func;
@@ -7853,6 +7876,10 @@ int ast_manager_register2(const char *action, int auth, int (*func)(struct manse
 
 		tmpxml = ast_xmldoc_build_synopsis("manager", action, NULL);
 		ast_string_field_set(cur, synopsis, tmpxml);
+		ast_free(tmpxml);
+
+		tmpxml = ast_xmldoc_build_provided_by("manager", action, NULL);
+		ast_string_field_set(cur, provided_by, tmpxml);
 		ast_free(tmpxml);
 
 		tmpxml = ast_xmldoc_build_syntax("manager", action, NULL);
@@ -9173,21 +9200,32 @@ static char *handle_manager_show_settings(struct ast_cli_entry *e, int cmd, stru
 
 #ifdef AST_XML_DOCS
 
-static int ast_xml_doc_item_cmp_fn(const void *a, const void *b)
+/* Sort function for ast_xml_doc_item by name field */
+AO2_STRING_FIELD_SORT_FN(ast_xml_doc_item, name);
+
+static int event_max_name_len_cb(void *obj, void *arg, void *data, int flags)
 {
-	struct ast_xml_doc_item **item_a = (struct ast_xml_doc_item **)a;
-	struct ast_xml_doc_item **item_b = (struct ast_xml_doc_item **)b;
-	return strcmp((*item_a)->name, (*item_b)->name);
+	struct ast_xml_doc_item *item = obj;
+	int *max_len = data;
+	int len = strlen(item->name);
+
+	if (len > *max_len) {
+		*max_len = len;
+	}
+
+	return 0;
 }
 
 static char *handle_manager_show_events(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
 {
 	struct ao2_container *events;
-	struct ao2_iterator *it_events;
+	struct ao2_container *sorted_events;
+	struct ao2_iterator it_events;
 	struct ast_xml_doc_item *item;
-	struct ast_xml_doc_item **items;
 	struct ast_str *buffer;
-	int i = 0, totalitems = 0;
+	int col = 0;
+	int maxlen = 0;
+	const char *dashes = "--------------------------------------------------------------------------------";
 
 	switch (cmd) {
 	case CLI_INIT:
@@ -9216,46 +9254,42 @@ static char *handle_manager_show_events(struct ast_cli_entry *e, int cmd, struct
 	}
 
 	ao2_lock(events);
-	if (!(it_events = ao2_callback(events, OBJ_MULTIPLE | OBJ_NOLOCK, NULL, NULL))) {
+	sorted_events = ao2_container_alloc_rbtree(AO2_ALLOC_OPT_LOCK_NOLOCK,
+		AO2_CONTAINER_ALLOC_OPT_DUPS_REPLACE,
+		ast_xml_doc_item_sort_fn, NULL);
+	if (!sorted_events) {
 		ao2_unlock(events);
-		ast_log(AST_LOG_ERROR, "Unable to create iterator for events container\n");
+		ast_log(AST_LOG_ERROR, "Unable to create sorted container for events\n");
 		ast_free(buffer);
 		ao2_ref(events, -1);
 		return CLI_SUCCESS;
 	}
-	if (!(items = ast_calloc(sizeof(struct ast_xml_doc_item *), ao2_container_count(events)))) {
-		ao2_unlock(events);
-		ast_log(AST_LOG_ERROR, "Unable to create temporary sorting array for events\n");
-		ao2_iterator_destroy(it_events);
-		ast_free(buffer);
-		ao2_ref(events, -1);
-		return CLI_SUCCESS;
-	}
+	ao2_container_dup(sorted_events, events, 0);
 	ao2_unlock(events);
+	ao2_ref(events, -1);
 
-	while ((item = ao2_iterator_next(it_events))) {
-		items[totalitems++] = item;
-		ao2_ref(item, -1);
-	}
-
-	qsort(items, totalitems, sizeof(struct ast_xml_doc_item *), ast_xml_doc_item_cmp_fn);
+	ao2_callback_data(sorted_events, OBJ_NODATA, event_max_name_len_cb, NULL, &maxlen);
+	it_events = ao2_iterator_init(sorted_events, AO2_ITERATOR_DONTLOCK);
 
 	ast_cli(a->fd, "Events:\n");
-	ast_cli(a->fd, "  --------------------  --------------------  --------------------  \n");
-	for (i = 0; i < totalitems; i++) {
-		ast_str_append(&buffer, 0, "  %-20.20s", items[i]->name);
-		if ((i + 1) % 3 == 0) {
+	ast_cli(a->fd, "  %.*s  %.*s  %.*s  \n", maxlen, dashes, maxlen, dashes, maxlen, dashes);
+
+	while ((item = ao2_iterator_next(&it_events))) {
+		ast_str_append(&buffer, 0, "  %-*s", maxlen, item->name);
+		if (++col % 3 == 0) {
 			ast_cli(a->fd, "%s\n", ast_str_buffer(buffer));
 			ast_str_set(&buffer, 0, "%s", "");
 		}
-	}
-	if ((i + 1) % 3 != 0) {
+		ao2_ref(item, -1);
+ 	}
+	ao2_iterator_destroy(&it_events);
+
+	if (col % 3 != 0) {
 		ast_cli(a->fd, "%s\n", ast_str_buffer(buffer));
 	}
+	ast_cli(a->fd, "\n%d events registered.\n", col);
 
-	ao2_iterator_destroy(it_events);
-	ast_free(items);
-	ao2_ref(events, -1);
+	ao2_ref(sorted_events, -1);
 	ast_free(buffer);
 
 	return CLI_SUCCESS;
@@ -9263,16 +9297,17 @@ static char *handle_manager_show_events(struct ast_cli_entry *e, int cmd, struct
 
 static void print_event_instance(struct ast_cli_args *a, struct ast_xml_doc_item *instance)
 {
-	char *since, *syntax, *description, *synopsis, *seealso, *arguments;
+	char *since, *syntax, *provided_by, *description, *synopsis, *seealso, *arguments;
 
 	synopsis = ast_xmldoc_printable(AS_OR(instance->synopsis, "Not available"), 1);
+	provided_by = ast_xmldoc_printable(AS_OR(instance->provided_by, "Not available"), 1);
 	since = ast_xmldoc_printable(AS_OR(instance->since, "Not available"), 1);
 	description = ast_xmldoc_printable(AS_OR(instance->description, "Not available"), 1);
 	syntax = ast_xmldoc_printable(AS_OR(instance->syntax, "Not available"), 1);
 	arguments = ast_xmldoc_printable(AS_OR(instance->arguments, "Not available"), 1);
 	seealso = ast_xmldoc_printable(AS_OR(instance->seealso, "Not available"), 1);
 
-	if (!synopsis || !since || !description || !syntax || !arguments || !seealso) {
+	if (!synopsis || !provided_by || !since || !description || !syntax || !arguments || !seealso) {
 		ast_cli(a->fd, "Error: Memory allocation failed\n");
 		goto free_docs;
 	}
@@ -9290,9 +9325,12 @@ static void print_event_instance(struct ast_cli_args *a, struct ast_xml_doc_item
 		COLORIZE_FMT "\n"
 		"%s\n\n"
 		COLORIZE_FMT "\n"
+		"%s\n\n"
+		COLORIZE_FMT "\n"
 		"%s\n\n",
 		ast_term_color(COLOR_MAGENTA, 0), instance->name, ast_term_reset(),
 		COLORIZE(COLOR_MAGENTA, 0, "[Synopsis]"), synopsis,
+		COLORIZE(COLOR_MAGENTA, 0, "[Provided By]"), provided_by,
 		COLORIZE(COLOR_MAGENTA, 0, "[Since]"), since,
 		COLORIZE(COLOR_MAGENTA, 0, "[Description]"), description,
 		COLORIZE(COLOR_MAGENTA, 0, "[Syntax]"), syntax,
@@ -9553,6 +9591,7 @@ static void manager_shutdown(void)
  */
 static int manager_subscriptions_init(void)
 {
+	struct ao2_container *sessions;
 	int res = 0;
 
 	rtp_topic_forwarder = stasis_forward_all(ast_rtp_topic(), manager_topic);
@@ -9572,11 +9611,26 @@ static int manager_subscriptions_init(void)
 	stasis_message_router_set_congestion_limits(stasis_router, -1,
 		6 * AST_TASKPROCESSOR_HIGH_WATER_LEVEL);
 
+	/*
+	 * The reference to sessions passes to the stasis router subscription so
+	 * no need to unref here at all. This is also invoked after creating the
+	 * sessions container so it has to exist.
+	 */
+	sessions = ao2_global_obj_ref(mgr_sessions);
+
 	stasis_message_router_set_formatters_default(stasis_router,
-		manager_default_msg_cb, NULL, STASIS_SUBSCRIPTION_FORMATTER_AMI);
+		manager_default_msg_cb, sessions, STASIS_SUBSCRIPTION_FORMATTER_AMI);
 
 	res |= stasis_message_router_add(stasis_router,
-		ast_manager_get_generic_type(), manager_generic_msg_cb, NULL);
+		ast_manager_get_generic_type(), manager_generic_msg_cb, sessions);
+
+	/*
+	 * This specific callback is solely for lifetime management of the sessions
+	 * reference. Once the subscription is finalized the reference is dropped in
+	 * the callback.
+	 */
+	res |= stasis_message_router_add(stasis_router,
+		stasis_subscription_change_type(), manager_subscription_change_msg_cb, sessions);
 
 	if (res != 0) {
 		return -1;

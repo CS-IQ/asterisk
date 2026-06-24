@@ -214,9 +214,9 @@ static enum dtmf_response record_dtmf_response(struct ast_channel *chan,
 static int create_destination_directory(const char *path)
 {
 	int res;
-	char directory[PATH_MAX], *file_sep;
+	char *path_copy = ast_strdupa(path), directory[PATH_MAX], *file_sep;
 
-	if (!(file_sep = strrchr(path, '/'))) {
+	if (!(file_sep = strrchr(path_copy, '/'))) {
 		/* No directory to create */
 		return 0;
 	}
@@ -225,8 +225,8 @@ static int create_destination_directory(const char *path)
 	*file_sep = '\0';
 
 	/* Absolute path? */
-	if (path[0] == '/') {
-		res = ast_mkdir(path, 0777);
+	if (path_copy[0] == '/') {
+		res = ast_mkdir(path_copy, 0777);
 		*file_sep = '/';
 		return res;
 	}
@@ -457,15 +457,11 @@ static int record_exec(struct ast_channel *chan, const char *data)
 	}
 
 	if (!ast_test_flag(&flags, OPTION_QUIET)) {
-		/* Some code to play a nice little beep to signify the start of the record operation */
-		res = ast_streamfile(chan, "beep", ast_channel_language(chan));
-		if (!res) {
-			res = ast_waitstream(chan, "");
-		} else {
-			ast_log(LOG_WARNING, "ast_streamfile(beep) failed on %s\n", ast_channel_name(chan));
-			res = 0;
+		/* Play a beep to signify the start of the record operation */
+		if (ast_stream_and_wait(chan, "beep", "")) {
+			status_response = "HANGUP";
+			goto out;
 		}
-		ast_stopstream(chan);
 	}
 
 	/* The end of beep code.  Now the recording starts */

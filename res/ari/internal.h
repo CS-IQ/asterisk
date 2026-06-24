@@ -25,6 +25,7 @@
  * \author David M. Lee, II <dlee@digium.com>
  */
 
+#include "asterisk/acl.h"
 #include "asterisk/http.h"
 #include "asterisk/json.h"
 #include "asterisk/md5.h"
@@ -91,15 +92,21 @@ struct ari_conf_user {
 	enum ari_user_password_format password_format;
 	/*! If true, user cannot execute change operations */
 	int read_only;
+	/*! ACL setting */
+	struct ast_acl_list *acl;
 };
 
+/*
+ * Using 1ULL is important as it forces the enum to be 64 bits to match
+ * the size of enum ast_ws_client_fields.
+ */
 enum ari_conf_owc_fields {
 	ARI_OWC_FIELD_NONE =                    0,
-	ARI_OWC_FIELD_WEBSOCKET_CONNECTION_ID = (1 << AST_WS_CLIENT_FIELD_USER_START),
-	ARI_OWC_FIELD_APPS =                    (1 << (AST_WS_CLIENT_FIELD_USER_START + 1)),
-	ARI_OWC_FIELD_LOCAL_ARI_USER =          (1 << (AST_WS_CLIENT_FIELD_USER_START + 2)),
-	ARI_OWC_FIELD_LOCAL_ARI_PASSWORD =      (1 << (AST_WS_CLIENT_FIELD_USER_START + 3)),
-	ARI_OWC_FIELD_SUBSCRIBE_ALL =           (1 << (AST_WS_CLIENT_FIELD_USER_START + 4)),
+	ARI_OWC_FIELD_WEBSOCKET_CONNECTION_ID = (1ULL << AST_WS_CLIENT_FIELD_USER_START),
+	ARI_OWC_FIELD_APPS =                    (1ULL << (AST_WS_CLIENT_FIELD_USER_START + 1)),
+	ARI_OWC_FIELD_LOCAL_ARI_USER =          (1ULL << (AST_WS_CLIENT_FIELD_USER_START + 2)),
+	ARI_OWC_FIELD_LOCAL_ARI_PASSWORD =      (1ULL << (AST_WS_CLIENT_FIELD_USER_START + 3)),
+	ARI_OWC_FIELD_SUBSCRIBE_ALL =           (1ULL << (AST_WS_CLIENT_FIELD_USER_START + 4)),
 	ARI_OWC_NEEDS_RECONNECT = AST_WS_CLIENT_NEEDS_RECONNECT
 	| ARI_OWC_FIELD_WEBSOCKET_CONNECTION_ID | ARI_OWC_FIELD_LOCAL_ARI_USER
 	| ARI_OWC_FIELD_LOCAL_ARI_PASSWORD,

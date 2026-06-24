@@ -127,7 +127,7 @@ static int add_cert_expiration_to_astdb(struct ast_stir_shaken_vs_ctx *cert,
 	config_expires = current_time + cfg->vcfg_common.max_cache_entry_age;
 
 	if (!ast_strlen_zero(cache_control_header)) {
-		char *str_max_age;
+		const char *str_max_age;
 
 		str_max_age = strstr(cache_control_header, "s-maxage");
 		if (!str_max_age) {
@@ -136,7 +136,7 @@ static int add_cert_expiration_to_astdb(struct ast_stir_shaken_vs_ctx *cert,
 
 		if (str_max_age) {
 			unsigned int m;
-			char *equal = strchr(str_max_age, '=');
+			const char *equal = strchr(str_max_age, '=');
 			if (equal && !ast_str_to_uint(equal + 1, &m)) {
 				max_age_hdr = current_time + m;
 			}
@@ -266,10 +266,10 @@ static enum ast_stir_shaken_vs_response_code
 			LOG_ERROR, "%s: Cert '%s' doesn't have a TNAuthList extension\n",
 			ctx->tag, ctx->public_url);
 	}
-	octet_str_data = tn_exten->data;
+	octet_str_data = ASN1_STRING_get0_data(tn_exten);
 
 	/* The first call to ASN1_get_object should return a SEQUENCE */
-	ret = ASN1_get_object(&octet_str_data, &xlen, &tag, &xclass, tn_exten->length);
+	ret = ASN1_get_object(&octet_str_data, &xlen, &tag, &xclass, ASN1_STRING_length(tn_exten));
 	if (IS_GET_OBJ_ERR(ret)) {
 		crypto_log_openssl(LOG_ERROR, "%s: Cert '%s' has malformed TNAuthList extension\n",
 			ctx->tag, ctx->public_url);
@@ -293,7 +293,7 @@ static enum ast_stir_shaken_vs_response_code
 	 * ATIS-1000080 however limits this to only ASN1_TAG_TNAUTH_SPC
 	 *
 	 */
-	ret = ASN1_get_object(&octet_str_data, &xlen, &tag, &xclass, tn_exten->length);
+	ret = ASN1_get_object(&octet_str_data, &xlen, &tag, &xclass, ASN1_STRING_length(tn_exten));
 	if (IS_GET_OBJ_ERR(ret)) {
 		crypto_log_openssl(LOG_ERROR, "%s: Cert '%s' has malformed TNAuthList extension\n",
 			ctx->tag, ctx->public_url);
@@ -307,7 +307,7 @@ static enum ast_stir_shaken_vs_response_code
 	}
 
 	/* The third call to ASN1_get_object should contain the SPC */
-	ret = ASN1_get_object(&octet_str_data, &xlen, &tag, &xclass, tn_exten->length);
+	ret = ASN1_get_object(&octet_str_data, &xlen, &tag, &xclass, ASN1_STRING_length(tn_exten));
 	if (ret != 0) {
 		SCOPE_EXIT_LOG_RTN_VALUE(AST_STIR_SHAKEN_VS_CERT_NO_SPC_IN_TN_AUTH_EXT,
 			LOG_ERROR, "%s: Cert '%s' has malformed TNAuthList extension (no SPC)\n",
@@ -897,7 +897,7 @@ enum ast_stir_shaken_vs_response_code
 	RAII_VAR(char *, jwt_encoded, NULL, ast_free);
 	RAII_VAR(jwt_t *, jwt, NULL, jwt_free);
 	RAII_VAR(struct ast_json *, grants, NULL, ast_json_unref);
-	char *p = NULL;
+	const char *p = NULL;
 	char *grants_str = NULL;
 	const char *x5u;
 	const char *ppt_header = NULL;

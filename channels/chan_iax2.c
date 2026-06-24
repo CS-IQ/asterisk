@@ -224,11 +224,24 @@
 			<enum name="peername">
 				<para>R/O Get the peer's username.</para>
 			</enum>
+			<enum name="auth_method">
+				<para>R/O Get the authentication method used for the call.</para>
+				<enumlist>
+					<enum name="none"/>
+					<enum name="plaintext"/>
+					<enum name="MD5"/>
+					<enum name="RSA"/>
+				</enumlist>
+			</enum>
 			<enum name="secure_signaling">
-				<para>R/O Get the if the IAX channel is secured.</para>
+				<para>R/O Get if the IAX channel is secured (encryption used for the call).</para>
+				<para>Because IAX encryption applies to both signaling and media, this setting
+				provides the same value as <literal>secure_media</literal>.</para>
 			</enum>
 			<enum name="secure_media">
-				<para>R/O Get the if the IAX channel is secured.</para>
+				<para>R/O Get if the IAX channel is secured (encryption used for the call).</para>
+				<para>Because IAX encryption applies to both signaling and media, this setting
+				provides the same value as <literal>secure_signaling</literal>.</para>
 			</enum>
 		</enumlist>
 	</info>
@@ -10145,7 +10158,7 @@ static int socket_process_meta(int packet_len, struct ast_iax2_meta_hdr *meta, s
 						iaxs[fr->callno]->last = fr->ts;
 				}
 			} else {
-				ast_log(LOG_WARNING, "Datalen < 0?\n");
+				ast_log(LOG_ERROR, "Dropping malformed frame (datalen %d?)\n", f.datalen);
 			}
 		}
 		ast_mutex_unlock(&iaxsl[fr->callno]);
@@ -12017,6 +12030,12 @@ immediatedial:
 			return 1;
 		}
 		f.datalen = res - sizeof(*vh);
+		if (f.datalen < 0) {
+			ast_log(LOG_ERROR, "Dropping malformed frame (datalen %d?)\n", f.datalen);
+			ast_variables_destroy(ies.vars);
+			ast_mutex_unlock(&iaxsl[fr->callno]);
+			return 1;
+		}
 		if (f.datalen)
 			f.data.ptr = thread->buf + sizeof(*vh);
 		else
@@ -12046,7 +12065,7 @@ immediatedial:
 		}
 		f.datalen = res - sizeof(struct ast_iax2_mini_hdr);
 		if (f.datalen < 0) {
-			ast_log(LOG_WARNING, "Datalen < 0?\n");
+			ast_log(LOG_ERROR, "Dropping malformed frame (datalen %d?)\n", f.datalen);
 			ast_variables_destroy(ies.vars);
 			ast_mutex_unlock(&iaxsl[fr->callno]);
 			return 1;
@@ -12150,6 +12169,14 @@ immediatedial:
 			ast_frame_byteswap_be(&f);
 	} else
 		f.samples = 0;
+
+	if (f.datalen < 0) {
+		ast_log(LOG_ERROR, "Dropping malformed frame (datalen %d?)\n", f.datalen);
+		ast_variables_destroy(ies.vars);
+		ast_mutex_unlock(&iaxsl[fr->callno]);
+		return 1;
+	}
+
 	iax_frame_wrap(fr, &f);
 
 	/* If this is our most recent packet, use it as our basis for timestamping */
@@ -14623,6 +14650,8 @@ static int acf_channel_read(struct ast_channel *chan, const char *funcname, char
 		ast_copy_string(buf, !ast_sockaddr_isnull(&pvt->addr) ? ast_sockaddr_stringify_addr(&pvt->addr) : "", buflen);
 	} else if (!strcasecmp(args, "peername")) {
 		ast_copy_string(buf, pvt->username, buflen);
+	} else if (!strcasecmp(args, "auth_method")) {
+		ast_copy_string(buf, auth_method_labels[pvt->eff_auth_method], buflen);
 	} else if (!strcasecmp(args, "secure_signaling") || !strcasecmp(args, "secure_media")) {
 		snprintf(buf, buflen, "%s", IAX_CALLENCRYPTED(pvt) ? "1" : "");
 	} else {

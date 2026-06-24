@@ -912,6 +912,7 @@ static int msg_send(void *data)
 		.body_text = ast_msg_get_body(mdata->msg)
 	};
 
+	pjsip_hdr *contact;
 	pjsip_tx_data *tdata;
 	RAII_VAR(char *, uri, NULL, ast_free);
 	RAII_VAR(struct ast_sip_endpoint *, endpoint, NULL, ao2_cleanup);
@@ -958,7 +959,15 @@ static int msg_send(void *data)
 		if (ast_begins_with(msg_to, "pjsip:")) {
 			msg_to += 6;
 		}
-		ast_sip_update_to_uri(tdata, msg_to);
+		/*
+		 * Only attempt to update the To URI if it's actually a SIP/SIPS URI.
+		 * When sending via ARI, the To field is also used as destination
+		 * (MessageDestinationInfo) and therefore might not contain a SIP URI.
+		 * ast_sip_create_request still sets the correct To header.
+		 */
+		if (ast_begins_with(msg_to, "sip:") || ast_begins_with(msg_to, "sips:")) {
+			ast_sip_update_to_uri(tdata, msg_to);
+		}
 	} else {
 		/*
 		 * If there was no To in the message, it's still possible
@@ -1023,7 +1032,11 @@ static int msg_send(void *data)
 	 * tdata.
 	 */
 	vars_to_headers(mdata->msg, tdata);
-
+	/* Remove Contact header fields as per RFC 3428*/
+	contact = pjsip_msg_find_hdr(tdata->msg, PJSIP_H_CONTACT, NULL);
+	if (contact) {
+		pj_list_erase(contact);
+	}
 	ast_debug(1, "Sending message to '%s' (via endpoint %s) from '%s'\n",
 		uri, ast_sorcery_object_get_id(endpoint), mdata->from);
 

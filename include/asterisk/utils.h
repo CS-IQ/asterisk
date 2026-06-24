@@ -28,7 +28,7 @@
 #include <time.h>	/* we want to override localtime_r */
 #include <unistd.h>
 #include <string.h>
-#include <endian.h>
+#include "asterisk/endian.h"
 
 #include "asterisk/lock.h"
 #include "asterisk/time.h"
@@ -769,7 +769,7 @@ void DO_CRASH_NORETURN __ast_assert_failed(int condition, const char *condition_
 		return __VA_ARGS__; \
 	}\
 })
-static void force_inline _ast_assert(int condition, const char *condition_str, const char *file, int line, const char *function)
+static force_inline void _ast_assert(int condition, const char *condition_str, const char *file, int line, const char *function)
 {
 	if (__builtin_expect(!condition, 1)) {
 		__ast_assert_failed(condition, condition_str, file, line, function);

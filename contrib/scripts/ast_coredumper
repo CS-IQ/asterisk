@@ -42,11 +42,9 @@ COMMANDLINE_COREDUMPS=false
 
 # Read config files from most important to least important.
 # Variables set on the command line or environment always take precedence.
-# shellcheck disable=SC1091
-[ -f ./ast_debug_tools.conf ] && source ./ast_debug_tools.conf
-# shellcheck disable=SC1090
-[ -f ~/ast_debug_tools.conf ] && source ~/ast_debug_tools.conf
-[ -f /etc/asterisk/ast_debug_tools.conf ] && source /etc/asterisk/ast_debug_tools.conf
+safe_source_config ./ast_debug_tools.conf
+safe_source_config ~/ast_debug_tools.conf
+safe_source_config /etc/asterisk/ast_debug_tools.conf
 
 if [ -n "${DATEFORMAT}" ] ; then
 	err <<-EOF
@@ -117,6 +115,7 @@ if $RUNNING ; then
 		if ${DRY_RUN} ; then
 			echo "Would run: ${GDB} -p $MAIN_PID -q --batch --ex gcore $cf"
 		else
+			install -m 0600 /dev/null "$cf"
 			${GDB} -p "$MAIN_PID" -q --batch --ex "gcore $cf" >/dev/null 2>&1
 		fi
 		echo "$(S_COR "${DRY_RUN}" 'Simulated dump' 'Dump') is complete."
@@ -245,7 +244,7 @@ fi
 
 gdbinit=${OUTPUTDIR}/.ast_coredumper.gdbinit
 trap 'rm $gdbinit' EXIT
-sed '1,/^#@@@SCRIPTSTART@@@/ d' "$0" >"$gdbinit"
+install -m 600 /dev/stdin "$gdbinit" < <(sed '1,/^#@@@SCRIPTSTART@@@/ d' "$0")
 
 # Now iterate over the coredumps and dump the debugging info
 for i in "${!COREDUMPS[@]}" ; do
@@ -297,6 +296,7 @@ for i in "${!COREDUMPS[@]}" ; do
 				of=${OUTPUTDIR}/${cfname}-${BASH_REMATCH[1]}
 				of=${of//:/-}
 				rm -f "$of"
+				install -m 0600 /dev/null "$of"
 				msg "    Creating $of"
 			fi
 			echo -e $"$line" >> "$of"
@@ -315,6 +315,7 @@ for i in "${!COREDUMPS[@]}" ; do
 		rm -rf "${dest}" 2>/dev/null || :
 
 		astbindir=$(dirname "${astbin}")
+		install -m 0700 -d "${dest}"
 		mkdir -p "${dest}/tmp" "${dest}/${moddir}" "${dest}/etc" \
 		"${dest}/${etcdir}" "${dest}/${libdir}" "${dest}/${astbindir}"
 
@@ -339,6 +340,7 @@ for i in "${!COREDUMPS[@]}" ; do
 		cp -a "${astbin}" "${dest}/${astbin}"
 		rm -rf "${tf}"
 		msg "    Creating ${tf}"
+		install -m 0600 /dev/null "$tf"
 		tar -chzf "${tf}" --transform="s/^[.]/${cfname}.output/" -C "${dest}" .
 		sleep 3
 		rm -rf "${dest}"
@@ -352,6 +354,7 @@ for i in "${!COREDUMPS[@]}" ; do
 		rm -rf "${dest}" 2>/dev/null || :
 		mkdir -p "${dest}"
 		cp "${OUTPUTDIR}/${cfname}"*.txt "${dest}/"
+		install -m 0600 /dev/null "$tf"
 		tar -chzf "${tf}" --transform="s/^[.]/${cfname}/" -C "${dest}" .
 		rm -rf "${dest}"
 		echo "Created $tf"
@@ -430,6 +433,43 @@ check_gdb() {
 		Use the '--gdb' option to point to one that does.
 		EOF
 	fi
+}
+
+# Function to safely source a config file with security checks
+# This prevents privilege escalation by ensuring config files are
+# owned by root and not writable by group or others
+safe_source_config() {
+	local config_file="$1"
+
+	# Return if file doesn't exist
+	[ -f "$config_file" ] || return 0
+
+	# Get the absolute path
+	config_file=$(readlink -f "$config_file")
+
+	# Get file owner UID and permissions
+	local file_stat
+	file_stat=$(stat -c "%u %a" "$config_file" 2>/dev/null) || return 0
+	local owner_uid=${file_stat%% *}
+	local perms=${file_stat##* }
+
+	# File must be owned by root (UID 0)
+	if [ "$owner_uid" -ne 0 ]; then
+		err "Config file $config_file is not owned by root. Skipping for security." >&2
+		return 1
+	fi
+
+	# File must not be writable by group or others (check group-write and other-write bits)
+	# Extract the group and other permission digits
+	local group_perms=$((perms / 10 % 10))
+	local other_perms=$((perms % 10))
+
+	if [ $((group_perms & 2)) -ne 0 ] || [ $((other_perms & 2)) -ne 0 ]; then
+		err "Config file $config_file is writable by group or others. Skipping for security." >&2
+		return 1
+	fi
+
+	source "$config_file"
 }
 
 # shellcheck disable=SC2317

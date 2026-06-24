@@ -58,7 +58,6 @@
 #define SDP_HANDLER_BUCKETS 11
 
 #define MOD_DATA_ON_RESPONSE "on_response"
-#define MOD_DATA_NAT_HOOK "nat_hook"
 
 /* Most common case is one audio and one video stream */
 #define DEFAULT_NUM_SESSION_MEDIA 2
@@ -3249,6 +3248,12 @@ struct ast_sip_session *ast_sip_session_create_outgoing(struct ast_sip_endpoint 
 	SCOPE_ENTER(1, "%s %s Topology: %s\n", ast_sorcery_object_get_id(endpoint), request_user,
 		ast_str_tmp(256, ast_stream_topology_to_str(req_topology, &STR_TMP)));
 
+	if (ast_sip_session_check_supplement_create(endpoint, contact, location,
+			request_user, req_topology)) {
+		SCOPE_EXIT_RTN_VALUE(NULL, "%s: Session creation blocked by supplement\n",
+			ast_sorcery_object_get_id(endpoint));
+	}
+
 	/* If no location has been provided use the AOR list from the endpoint itself */
 	if (location || !contact) {
 		location = S_OR(location, endpoint->aors);
@@ -5498,8 +5503,6 @@ static pjsip_inv_callback inv_callback = {
 static void session_outgoing_nat_hook(pjsip_tx_data *tdata, struct ast_sip_transport *transport)
 {
 	RAII_VAR(struct ast_sip_transport_state *, transport_state, ast_sip_get_transport_state(ast_sorcery_object_get_id(transport)), ao2_cleanup);
-	struct ast_sip_nat_hook *hook = ast_sip_mod_data_get(
-		tdata->mod_data, session_module.id, MOD_DATA_NAT_HOOK);
 	pjsip_sdp_info *sdp_info;
 	pjmedia_sdp_session *sdp;
 	pjsip_dialog *dlg = pjsip_tdata_get_dlg(tdata);
@@ -5507,10 +5510,9 @@ static void session_outgoing_nat_hook(pjsip_tx_data *tdata, struct ast_sip_trans
 	int stream;
 
 	/*
-	 * If there's no transport_state or body, or the hook
-	 * has already been run, just return.
+	 * If there's no transport_state or body, just return.
 	 */
-	if (ast_strlen_zero(transport->external_media_address) || !transport_state || hook || !tdata->msg->body) {
+	if (ast_strlen_zero(transport->external_media_address) || !transport_state || !tdata->msg->body) {
 		return;
 	}
 
@@ -5561,8 +5563,6 @@ static void session_outgoing_nat_hook(pjsip_tx_data *tdata, struct ast_sip_trans
 		}
 	}
 
-	/* We purposely do this so that the hook will not be invoked multiple times, ie: if a retransmit occurs */
-	ast_sip_mod_data_set(tdata->pool, tdata->mod_data, session_module.id, MOD_DATA_NAT_HOOK, nat_hook);
 }
 
 #ifdef TEST_FRAMEWORK

@@ -2105,6 +2105,7 @@ static int sip_outbound_registration_perform(void *data)
 	struct sip_outbound_registration *registration = ao2_bump(state->registration);
 	size_t i;
 	int max_delay;
+	pjsip_regc_info info;
 
 	/* Just in case the client state is being reused for this registration, free the auth information */
 	ast_sip_auth_vector_destroy(&state->client_state->outbound_auths);
@@ -2132,7 +2133,14 @@ static int sip_outbound_registration_perform(void *data)
 	state->client_state->auth_rejection_permanent = registration->auth_rejection_permanent;
 	max_delay = registration->max_random_initial_delay;
 
-	pjsip_regc_update_expires(state->client_state->client, registration->expiration);
+	/*
+	 * pjsip_regc_update_expires will remove the Expires header from the REGISTER request if the
+	 * expiration interval is re-set to the same value as the current interval.  We want to avoid
+	 * this so we only call it if the interval has changed.
+	 */
+	if (pjsip_regc_get_info(state->client_state->client, &info) == PJ_SUCCESS && info.interval != (unsigned) registration->expiration) {
+		pjsip_regc_update_expires(state->client_state->client, registration->expiration);
+	}
 
 	/* n mod 0 is undefined, so don't let that happen */
 	schedule_registration(state->client_state, (max_delay ? ast_random() % max_delay : 0) + 1);
@@ -2952,6 +2960,12 @@ static int load_module(void)
 		return AST_MODULE_LOAD_DECLINE;
 	}
 
+	/* Because we delegate to unload_module() in our error paths, everything we do here
+	   has to be idempotent. Due to the way we define our CLI handlers (specifically
+	   setting the `command` and `usage` members to statically allocated strings) we
+	   _must_ register them for them to later be safely unregistered. */
+	ast_cli_register_multiple(cli_outbound_registration, ARRAY_LEN(cli_outbound_registration));
+
 	/* Create outbound registration states container. */
 	new_states = ao2_container_alloc_hash(AO2_ALLOC_OPT_LOCK_MUTEX, 0,
 		DEFAULT_STATE_BUCKETS, registration_state_hash, NULL, registration_state_cmp);
@@ -3029,7 +3043,6 @@ static int load_module(void)
 	cli_formatter->get_id = ast_sorcery_object_get_id;
 	cli_formatter->retrieve_by_id = cli_retrieve_by_id;
 	ast_sip_register_cli_formatter(cli_formatter);
-	ast_cli_register_multiple(cli_outbound_registration, ARRAY_LEN(cli_outbound_registration));
 
 	/* Register AMI actions. */
 	ast_manager_register_xml("PJSIPUnregister", EVENT_FLAG_SYSTEM | EVENT_FLAG_REPORTING, ami_unregister);
